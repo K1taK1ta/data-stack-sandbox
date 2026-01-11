@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: mcp_app
+    restart: always
+    command: python main.py
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - mcp_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mcp_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest-alpine
+    container_name: clickhouse_db
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+          - CLICKHOUSE_DB=default
+          - CLICKHOUSE_USER=default
+          - CLICKHOUSE_PASSWORD=123
+          - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - ./ch_init.sql:/docker-entrypoint-initdb.d/init.sql
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - mcp_network
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "default", "--password", "123", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  vector:
+    image: timberio/vector:0.34.0-alpine
+    container_name: vector_agent
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - mcp_network
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana_ui
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - mcp_network
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase_ui
+    ports:
+      - "3001:3000"
+    environment:
+      - MB_DB_TYPE=postgres
+      - MB_DB_HOST=postgres_db
+      - MB_DB_PORT=5432
+      - MB_DB_DBNAME=${DB_NAME}
+      - MB_DB_USER=${DB_USER}
+      - MB_DB_PASS=${DB_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mcp_network
+
+networks:
+  mcp_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  grafana_data:

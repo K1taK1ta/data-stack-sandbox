@@ -1,0 +1,73 @@
+sources:
+  docker_logs:
+    type: docker_logs
+    include_containers:
+      - mcp_app
+
+transforms:
+  parse_logs:
+    type: "remap"
+    inputs:
+      - "docker_logs"
+    source: |
+
+      c_name = .container_name
+      raw_msg = .message
+
+      parsed, err = parse_json(.message)
+
+      if err == null {
+          . = merge(., parsed) ?? .
+          if .event == null { .event = raw_msg }
+      } else {
+          .event = raw_msg
+      }
+
+      .timestamp = format_timestamp(now(), format: "%Y-%m-%d %H:%M:%S.%3f") ?? ""
+
+      if .level == null {
+          extracted, err = parse_regex(to_string(.event) ?? "", r'^(?i)(?P<lvl>INFO|ERROR|WARN|DEBUG|CRITICAL)')
+          if err == null {
+              # Добавляем ?? unknown" на случай, если downcase не сможет обработать вход
+              .level = downcase(to_string(extracted) ?? "unknown")
+          }
+      }
+
+      # Еще раз гарантируем, что уровень — это строка в нижнем регистре
+      .level = downcase(to_string(.level) ?? "unknown")
+
+      # Гарантируем строковые типы для ClickHouse
+      .event = to_string(.event) ?? to_string(raw_msg) ?? "empty_event"
+
+      if is_object(.kwargs) {
+          .kwargs = encode_json(.kwargs)
+      } else {
+          .kwargs = "{}"
+      }
+
+      .container_name = replace(to_string(c_name) ?? "unknown", "/", "")
+
+      # 4. Удаляем лишние поля
+      del(.message)
+      del(.source_type)
+      del(.stream)
+      del(.host)
+      del(.container_id)
+      del(.image)
+      del(.container_created_at)
+      del(.label)
+
+sinks:
+  clickhouse_output:
+    type: "clickhouse"
+    inputs:
+      - "parse_logs"
+    endpoint: "http://clickhouse_db:8123"
+    auth:
+      strategy: "basic"
+      user: "default"
+      password: "123"
+    database: "default"
+    table: "logs"
+    skip_unknown_fields: true
+    date_time_best_effort: true
